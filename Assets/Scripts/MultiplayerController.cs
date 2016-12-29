@@ -6,11 +6,14 @@ using System;
 using System.Collections.Generic;
 public class MultiplayerController : RealTimeMultiplayerListener
 {
+    private int _finishMessageLength = 6;
+    private int _myMessageNum;
+
     public MPUpdateListener updateListener;
 
-    private byte _protocolVersion = 1;
+    private byte _protocolVersion = 2;
     // Byte + Byte + 2 floats for position + 2 floats for velcocity + 1 float for rotZ
-    private int _updateMessageLength = 22;
+    private int _updateMessageLength = 26;
     private List<byte> _updateMessage;
 
     private uint minimumOpponents = 1;
@@ -42,6 +45,8 @@ public class MultiplayerController : RealTimeMultiplayerListener
         _updateMessage.Clear();
         _updateMessage.Add(_protocolVersion);
         _updateMessage.Add((byte)'U');
+        _updateMessage.AddRange(System.BitConverter.GetBytes(++_myMessageNum)); // THIS IS THE NEW LINE
+
         _updateMessage.AddRange(System.BitConverter.GetBytes(posX));
         _updateMessage.AddRange(System.BitConverter.GetBytes(posY));
         _updateMessage.AddRange(System.BitConverter.GetBytes(velocity.x));
@@ -50,6 +55,15 @@ public class MultiplayerController : RealTimeMultiplayerListener
         byte[] messageToSend = _updateMessage.ToArray();
         Debug.Log("Sending my update message  " + messageToSend + " to all players in the room");
         PlayGamesPlatform.Instance.RealTime.SendMessageToAll(false, messageToSend);
+    }
+    public void SendFinishMessage(float totalTime)
+    {
+        List<byte> bytes = new List<byte>(_finishMessageLength);
+        bytes.Add(_protocolVersion);
+        bytes.Add((byte)'F');
+        bytes.AddRange(System.BitConverter.GetBytes(totalTime));
+        byte[] messageToSend = bytes.ToArray();
+        PlayGamesPlatform.Instance.RealTime.SendMessageToAll(true, messageToSend);
     }
     public void SignInAndStartMPGame()
     {
@@ -123,6 +137,8 @@ public class MultiplayerController : RealTimeMultiplayerListener
         {
             lobbyListener.HideLobby();
             lobbyListener = null;
+            _myMessageNum = 0;
+
             Application.LoadLevel("MainGame");
         }
         else
@@ -133,7 +149,11 @@ public class MultiplayerController : RealTimeMultiplayerListener
 
     public void OnLeftRoom()
     {
-        ShowMPStatus("We have left the room. We should probably perform some clean-up tasks.");
+        ShowMPStatus("We have left the room.");
+        if (updateListener != null)
+        {
+            updateListener.LeftRoomConfirmed();
+        }
     }
 
     public void OnParticipantLeft(Participant participant)
@@ -154,6 +174,10 @@ public class MultiplayerController : RealTimeMultiplayerListener
         foreach (string participantID in participantIds)
         {
             ShowMPStatus("Player " + participantID + " has left.");
+            if (updateListener != null)
+            {
+                updateListener.PlayerLeftRoom(participantID);
+            }
         }
     }
 
@@ -161,24 +185,47 @@ public class MultiplayerController : RealTimeMultiplayerListener
     {
         // We'll be doing more with this later...
         byte messageVersion = (byte)data[0];
+        if (messageVersion < _protocolVersion)
+        {
+            // Our opponent seems to be out of date.
+            Debug.Log("Our opponent is using an older client.");
+            return;
+        }
+        else if (messageVersion > _protocolVersion)
+        {
+            // Our opponents seem to be using a newer client version than our own! 
+            // In a real game, we might want to prompt the user to update their game.
+            Debug.Log("Our opponent has a newer client!");
+            return;
+        }
         // Let's figure out what type of message this is.
         char messageType = (char)data[1];
         if (messageType == 'U' && data.Length == _updateMessageLength)
         {
-            float posX = System.BitConverter.ToSingle(data, 2);
-            float posY = System.BitConverter.ToSingle(data, 6);
-            float velX = System.BitConverter.ToSingle(data, 10);
-            float velY = System.BitConverter.ToSingle(data, 14);
-            float rotZ = System.BitConverter.ToSingle(data, 18);
-            Debug.Log("Player " + senderId + " is at (" + posX + ", " + posY + ") traveling (" + velX + ", " + velY + ") rotation " + rotZ);
-            // We'd better tell our GameController about this.
+            int messageNum = System.BitConverter.ToInt32(data, 2);
+            float posX = System.BitConverter.ToSingle(data, 6);
+            float posY = System.BitConverter.ToSingle(data, 10);
+            float velX = System.BitConverter.ToSingle(data, 14);
+            float velY = System.BitConverter.ToSingle(data, 18);
+            float rotZ = System.BitConverter.ToSingle(data, 22);
+
             if (updateListener != null)
             {
-                updateListener.UpdateReceived(senderId, posX, posY, velX, velY, rotZ);
+                updateListener.UpdateReceived(senderId, messageNum, posX, posY, velX, velY, rotZ);
             }
+        }
+        else if (messageType == 'F' && data.Length == _finishMessageLength)
+        {
+            // We received a final time!
+            float finalTime = System.BitConverter.ToSingle(data, 2);
+            Debug.Log("Player " + senderId + " has finished with a time of " + finalTime);
         }
 
 
+    }
+    public void LeaveGame()
+    {
+        PlayGamesPlatform.Instance.RealTime.LeaveRoom();
     }
 
     public static MultiplayerController Instance

@@ -7,6 +7,12 @@ using System;
 public class GameController : MonoBehaviour, MPUpdateListener
 {
 
+    public float timeOutThreshold = 5.0f;
+    private float _timeOutCheckInterval = 1.0f;
+    private float _nextTimeoutCheck = 0.0f;
+    private Dictionary<string, float> _finishTimes;
+
+    private float _nextBroadcastTime = 0;
 
     public GameObject opponentPrefab;
 
@@ -54,14 +60,31 @@ public class GameController : MonoBehaviour, MPUpdateListener
 		}
 
 	}
-    public void UpdateReceived(string senderId, float posX, float posY, float velX, float velY, float rotZ)
+    void CheckForTimeOuts()
+    {
+        foreach (string participantId in _opponentScripts.Keys)
+        {
+            // We can skip anybody who's finished.
+            if (_finishTimes[participantId] < 20)
+            {
+                if (_opponentScripts[participantId].lastUpdateTime < Time.time - timeOutThreshold)
+                {
+                    // Haven't heard from them in a while!
+                    Debug.Log("Haven't heard from " + participantId + " in " + timeOutThreshold +
+                              " seconds! They're outta here!");
+                    PlayerLeftRoom(participantId);
+                }
+            }
+        }
+    }
+    public void UpdateReceived(string senderId, int messageNum, float posX, float posY, float velX, float velY, float rotZ)
     {
         if (_multiplayerReady)
         {
             OpponentCarController opponent = _opponentScripts[senderId];
             if (opponent != null)
             {
-                opponent.SetCarInformation(posX, posY, velX, velY, rotZ);
+                opponent.SetCarInformation(messageNum, posX, posY, velX, velY, rotZ);
             }
         }
     }
@@ -74,11 +97,12 @@ public class GameController : MonoBehaviour, MPUpdateListener
         // 2
         List<Participant> allPlayers = MultiplayerController.Instance.GetAllPlayers();
         _opponentScripts = new Dictionary<string, OpponentCarController>(allPlayers.Count - 1);
+        _finishTimes = new Dictionary<string, float>(allPlayers.Count);
+
         for (int i = 0; i < allPlayers.Count; i++)
         {
             string nextParticipantId = allPlayers[i].ParticipantId;
-            Debug.Log("Setting up car for " + nextParticipantId);
-            // 3
+            _finishTimes[nextParticipantId] = -1;            // 3
             Vector3 carStartPoint = new Vector3(_startingPoint.x, _startingPoint.y + (i * _startingPointYOffset), 0);
             if (nextParticipantId == _myParticipantId)
             {
@@ -104,8 +128,48 @@ public class GameController : MonoBehaviour, MPUpdateListener
         _multiplayerReady = true;
     }
 
+    public void PlayerFinished(string senderId, float finalTime)
+    {
+        Debug.Log("Participant " + senderId + " has finished with a time of " + finalTime);
+        if (_finishTimes[senderId] < 0)
+        {
+            _finishTimes[senderId] = finalTime;
+        }
+        CheckForMPGameOver();
+    }
+    void CheckForMPGameOver()
+    {
+        float myTime = _finishTimes[_myParticipantId];
+        int fasterThanMe = 0;
+        foreach (float nextTime in _finishTimes.Values)
+        {
+            if (nextTime < 0)
+            { // Somebody's not done yet
+                return;
+            }
+            if (nextTime < myTime)
+            {
+                fasterThanMe++;
+            }
+        }
+        string[] places = new string[] { "1st", "2nd", "3rd", "4th" };
+        gameOvertext = "Game over! You are in " + places[fasterThanMe] + " place!";
+        PauseGame(); // Should be redundant at this point
+        _showingGameOver = true;
+        // TODO: Leave the room and go back to the main menu
+        Invoke("LeaveMPGame", 3.0f);
+    }
+    void LeaveMPGame()
+    {
+        MultiplayerController.Instance.LeaveGame();
+    }
+    public void LeftRoomConfirmed()
+    {
+        MultiplayerController.Instance.updateListener = null;
+        Application.LoadLevel("MainMenu");
+    }
 
-	void PauseGame() {
+    void PauseGame() {
 		_paused = true;
 		myCar.GetComponent<CarController>().SetPaused(true);
 	}
@@ -120,9 +184,31 @@ public class GameController : MonoBehaviour, MPUpdateListener
 	void StartNewGame() {
 		Application.LoadLevel ("MainMenu");
 	}
+    public void PlayerLeftRoom(string participantId)
+    {
+        if (_finishTimes[participantId] < 0)
+        {
+            _finishTimes[participantId] = 999999.0f;
+            if (_opponentScripts[participantId] != null)
+            {
+                _opponentScripts[participantId].HideCar();
+            }
+            CheckForMPGameOver();
+        }
+    }
+    void OnGUI() {
 
-	void OnGUI() {
-		if (_showingGameOver) {
+        if (_multiplayerGame)
+        {
+            if (GUI.Button(new Rect(0.0f, 0.0f, Screen.width * 0.1f, Screen.height * 0.1f), "Quit"))
+            {
+
+                // Tell the multiplayer controller to leave the game
+                MultiplayerController.Instance.LeaveGame();
+            }
+        }
+
+        if (_showingGameOver) {
 			GUI.skin = guiSkin;
 			GUI.Box(new Rect(Screen.width * 0.25f, Screen.height * 0.25f, Screen.width * 0.5f, Screen.height * 0.5f), gameOvertext);
 
@@ -131,52 +217,82 @@ public class GameController : MonoBehaviour, MPUpdateListener
     
     
     void DoMultiplayerUpdate() {
+        if (Time.time > _nextTimeoutCheck)
+        {
+            CheckForTimeOuts();
+            _nextTimeoutCheck = Time.time + _timeOutCheckInterval;
+        }
         // In a multiplayer game, time counts up!
         _timePlayed += Time.deltaTime;
         guiObject.SetTime(_timePlayed);
-
-        MultiplayerController.Instance.SendMyUpdate(myCar.transform.position.x,
-                                            myCar.transform.position.y,
-                                            myCar.GetComponent<Rigidbody2D>().velocity,
-                                            myCar.transform.rotation.eulerAngles.z);
+        if (Time.time > _nextBroadcastTime)
+        {
+            MultiplayerController.Instance.SendMyUpdate(myCar.transform.position.x,
+                                                        myCar.transform.position.y,
+                                                        myCar.GetComponent<Rigidbody2D>().velocity,
+                                                        myCar.transform.rotation.eulerAngles.z);
+            _nextBroadcastTime = Time.time + .16f;
+        }
 
     }
-	
-	void Update () {
-		if (_paused) {
-			return;
-		}
 
-		if (_multiplayerGame) {
+    void Update()
+    {
+        if (_paused)
+        {
+            return;
+        }
+
+        if (_multiplayerGame)
+        {
             DoMultiplayerUpdate();
-		} else {
-			_timeLeft -= Time.deltaTime;
-			guiObject.SetTime (_timeLeft);
-			if (_timeLeft <= 0) {
-				ShowGameOver (false);
-			}
-		}
+        }
+        else
+        {
+            _timeLeft -= Time.deltaTime;
+            guiObject.SetTime(_timeLeft);
+            if (_timeLeft <= 0)
+            {
+                ShowGameOver(false);
+            }
+        }
 
-		float carAngle = Mathf.Atan2 (myCar.transform.position.y, myCar.transform.position.x) + Mathf.PI;
-		if (carAngle >= _nextCarAngleTarget && (carAngle - _nextCarAngleTarget) < Mathf.PI / 4) {
-			_nextCarAngleTarget += Mathf.PI / 2;
-			if (Mathf.Approximately(_nextCarAngleTarget, 2*Mathf.PI)) _nextCarAngleTarget = 0;
-			if (Mathf.Approximately(_nextCarAngleTarget, FINISH_TARGET)) {
-				_lapsRemaining -= 1;
-				Debug.Log("Next lap finished!");
-				guiObject.SetLaps (_lapsRemaining);
-				myCar.GetComponent<CarController>().PlaySoundForLapFinished();
-				if (_lapsRemaining <= 0) {
-					if (_multiplayerGame) {
-						// TODO: Properly finish a multiplayer game
-					} else {
-						ShowGameOver(true);
-					}
-				}
-			}
-		}
+        float carAngle = Mathf.Atan2(myCar.transform.position.y, myCar.transform.position.x) + Mathf.PI;
+        if (carAngle >= _nextCarAngleTarget && (carAngle - _nextCarAngleTarget) < Mathf.PI / 4)
+        {
+            _nextCarAngleTarget += Mathf.PI / 2;
+            if (Mathf.Approximately(_nextCarAngleTarget, 2 * Mathf.PI)) _nextCarAngleTarget = 0;
+            if (Mathf.Approximately(_nextCarAngleTarget, FINISH_TARGET))
+            {
+                _lapsRemaining -= 1;
+                Debug.Log("Next lap finished!");
+                guiObject.SetLaps(_lapsRemaining);
+                myCar.GetComponent<CarController>().PlaySoundForLapFinished();
+                if (_lapsRemaining <= 0)
+                {
+                    if (_multiplayerGame)
+                    {
+                        // 1
+                        myCar.GetComponent<CarController>().Stop();
+                        // 2
+                        MultiplayerController.Instance.SendMyUpdate(myCar.transform.position.x,
+                                                                    myCar.transform.position.y,
+                                                                    new Vector2(0, 0),
+                                                                    myCar.transform.rotation.eulerAngles.z);
+                        // 3
+                        MultiplayerController.Instance.SendFinishMessage(_timePlayed);
+                        PlayerFinished(_myParticipantId, _timePlayed);
+                    }
+                    else
+                    {
+                        ShowGameOver(true);
+                    }
+                }
+            }
+        }
 
-	}
+    }
 
-  
+
+
 }
